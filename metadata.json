@@ -1,0 +1,6 @@
+{
+  "name": "Roda Pintar Budaya Kekerabatan Keluarga Lampung",
+  "description": "Media pembelajaran interaktif kekerabatan adat Lampung untuk SMP Negeri 2 Limau Tanggamus dengan roda berputar, bagan silsilah, kamus tutokh, dan kuis yang dapat diedit guru.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
