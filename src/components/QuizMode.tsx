@@ -3,7 +3,9 @@ import {
   Award,
   CheckCircle2,
   Clock,
+  Crown,
   Edit3,
+  Grid3X3,
   ImagePlus,
   Medal,
   Plus,
@@ -12,7 +14,10 @@ import {
   Trash2,
   Trophy,
   Upload,
+  User,
   Users,
+  Volume2,
+  VolumeX,
   X,
   XCircle,
   ZoomIn,
@@ -23,10 +28,18 @@ import {
   QuizScoreRecord,
   WHEEL_ASSETS,
 } from '../data/kinshipData';
+import {
+  playCorrectSfx,
+  playTimeoutSfx,
+  playVictorySfx,
+  playWrongSfx,
+} from '../utils/quizSfx';
+import { WordSearchGame } from './WordSearchGame';
 
 const QUIZ_STORAGE_KEY = 'roda_pintar_lampung_quiz_bank_v1';
 const SCORE_STORAGE_KEY = 'roda_pintar_lampung_quiz_scores_v1';
 const TIMER_STORAGE_KEY = 'roda_pintar_lampung_quiz_timer_v1';
+const SFX_STORAGE_KEY = 'roda_pintar_lampung_quiz_sfx_v1';
 
 const TIMER_OPTIONS = [
   { value: 15, label: '15 Detik (Cepat)' },
@@ -152,6 +165,60 @@ function sortScoresForLeaderboard(
   });
 }
 
+function loadSfxSetting(): boolean {
+  try {
+    const raw = localStorage.getItem(SFX_STORAGE_KEY);
+    if (raw === 'false') return false;
+  } catch {
+    // ignore storage errors
+  }
+  return true;
+}
+
+interface PlayerDuelSession {
+  name: string;
+  currentIndex: number;
+  selectedOption: number | null;
+  isTimedOut: boolean;
+  timeLeft: number;
+  correctCount: number;
+  elapsedSeconds: number;
+  finished: boolean;
+  imageError: boolean;
+}
+
+function createDuelSession(
+  defaultName: string,
+  timerSeconds: number
+): PlayerDuelSession {
+  return {
+    name: defaultName,
+    currentIndex: 0,
+    selectedOption: null,
+    isTimedOut: false,
+    timeLeft: timerSeconds,
+    correctCount: 0,
+    elapsedSeconds: 0,
+    finished: false,
+    imageError: false,
+  };
+}
+
+function shuffleQuestionsForDuel(list: QuizQuestion[]): QuizQuestion[] {
+  if (list.length <= 1) return [...list];
+  const copy = [...list];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  // Pastikan soal pertama pemain 2 berbeda dengan pemain 1 agar adil di layar yang sama
+  if (copy[0].id === list[0].id) {
+    const first = copy.shift()!;
+    copy.push(first);
+  }
+  return copy;
+}
+
 /**
  * Mengoptimalkan gambar unggahan guru agar tetap tajam di layar namun hemat ruang penyimpanan peramban.
  */
@@ -219,6 +286,10 @@ export const QuizMode: React.FC = () => {
   );
 
   // Student quiz state
+  const [playerMode, setPlayerMode] = useState<'single' | 'two' | 'wordsearch'>(
+    'single'
+  );
+  const [sfxEnabled, setSfxEnabled] = useState<boolean>(loadSfxSetting);
   const [studentName, setStudentName] = useState<string>('');
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [selectedOption, setSelectedOption] = useState<number | null>(null);
@@ -231,6 +302,19 @@ export const QuizMode: React.FC = () => {
   const [latestScoreId, setLatestScoreId] = useState<string | null>(null);
   const [boardView, setBoardView] = useState<'ranking' | 'recent'>('ranking');
   const [confirmClearScores, setConfirmClearScores] = useState<boolean>(false);
+
+  // Two-player split-screen duel state
+  const [duelQuestionsP2, setDuelQuestionsP2] = useState<QuizQuestion[]>(() =>
+    shuffleQuestionsForDuel(loadQuestionsFromStorage())
+  );
+  const [p1Session, setP1Session] = useState<PlayerDuelSession>(() =>
+    createDuelSession('Pemain 1', loadTimerSetting())
+  );
+  const [p2Session, setP2Session] = useState<PlayerDuelSession>(() =>
+    createDuelSession('Pemain 2', loadTimerSetting())
+  );
+  const [duelRecorded, setDuelRecorded] = useState<boolean>(false);
+
   const [zoomedQuizImage, setZoomedQuizImage] = useState<{
     url: string;
     caption?: string;
@@ -281,12 +365,23 @@ export const QuizMode: React.FC = () => {
     }
   }, [timerDuration]);
 
-  const activeQuestion = questions[currentIndex] ?? null;
+  useEffect(() => {
+    try {
+      localStorage.setItem(SFX_STORAGE_KEY, String(sfxEnabled));
+    } catch {
+      // ignore storage errors
+    }
+  }, [sfxEnabled]);
 
-  // Timer hitung mundur per soal di Mode Kuis Siswa
+  const activeQuestion = questions[currentIndex] ?? null;
+  const p1Question = questions[p1Session.currentIndex] ?? null;
+  const p2Question = duelQuestionsP2[p2Session.currentIndex] ?? null;
+
+  // Timer hitung mundur per soal di Mode Kuis 1 Pemain
   useEffect(() => {
     if (
       subMode !== 'play' ||
+      playerMode !== 'single' ||
       quizFinished ||
       !activeQuestion ||
       selectedOption !== null ||
@@ -303,6 +398,7 @@ export const QuizMode: React.FC = () => {
     return () => window.clearInterval(intervalId);
   }, [
     subMode,
+    playerMode,
     quizFinished,
     activeQuestion,
     selectedOption,
@@ -311,30 +407,43 @@ export const QuizMode: React.FC = () => {
     currentIndex,
   ]);
 
-  // Tandai waktu habis secara bersih saat hitungan mencapai 0
+  // Tandai waktu habis secara bersih saat hitungan mencapai 0 (1 Pemain)
   useEffect(() => {
     if (
       subMode === 'play' &&
+      playerMode === 'single' &&
       !quizFinished &&
       activeQuestion &&
       selectedOption === null &&
+      !isTimedOut &&
       timerDuration > 0 &&
       timeLeft === 0
     ) {
       setIsTimedOut(true);
+      if (sfxEnabled) {
+        playTimeoutSfx();
+      }
     }
   }, [
     subMode,
+    playerMode,
     quizFinished,
     activeQuestion,
     selectedOption,
+    isTimedOut,
     timerDuration,
     timeLeft,
+    sfxEnabled,
   ]);
 
-  // Pencatat total waktu pengerjaan satu sesi kuis siswa
+  // Pencatat total waktu pengerjaan satu sesi kuis 1 Pemain
   useEffect(() => {
-    if (subMode !== 'play' || quizFinished || !activeQuestion) {
+    if (
+      subMode !== 'play' ||
+      playerMode !== 'single' ||
+      quizFinished ||
+      !activeQuestion
+    ) {
       return;
     }
 
@@ -343,13 +452,209 @@ export const QuizMode: React.FC = () => {
     }, 1000);
 
     return () => window.clearInterval(timerId);
-  }, [subMode, quizFinished, activeQuestion]);
+  }, [subMode, playerMode, quizFinished, activeQuestion]);
+
+  // Timer dan durasi sesi untuk Mode 2 Pemain (Layar Terbagi)
+  useEffect(() => {
+    if (subMode !== 'play' || playerMode !== 'two' || questions.length === 0) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setP1Session((prev) => {
+        if (prev.finished) return prev;
+        const shouldCountdown =
+          timerDuration > 0 &&
+          prev.selectedOption === null &&
+          !prev.isTimedOut;
+        return {
+          ...prev,
+          elapsedSeconds: prev.elapsedSeconds + 1,
+          timeLeft: shouldCountdown
+            ? prev.timeLeft > 0
+              ? prev.timeLeft - 1
+              : 0
+            : prev.timeLeft,
+        };
+      });
+
+      setP2Session((prev) => {
+        if (prev.finished) return prev;
+        const shouldCountdown =
+          timerDuration > 0 &&
+          prev.selectedOption === null &&
+          !prev.isTimedOut;
+        return {
+          ...prev,
+          elapsedSeconds: prev.elapsedSeconds + 1,
+          timeLeft: shouldCountdown
+            ? prev.timeLeft > 0
+              ? prev.timeLeft - 1
+              : 0
+            : prev.timeLeft,
+        };
+      });
+    }, 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [subMode, playerMode, questions.length, timerDuration]);
+
+  // Deteksi waktu habis Pemain 1 (2 Pemain)
+  useEffect(() => {
+    if (
+      subMode === 'play' &&
+      playerMode === 'two' &&
+      !p1Session.finished &&
+      p1Question &&
+      p1Session.selectedOption === null &&
+      !p1Session.isTimedOut &&
+      timerDuration > 0 &&
+      p1Session.timeLeft === 0
+    ) {
+      setP1Session((prev) => ({ ...prev, isTimedOut: true }));
+      if (sfxEnabled) {
+        playTimeoutSfx();
+      }
+    }
+  }, [
+    subMode,
+    playerMode,
+    p1Session.finished,
+    p1Session.selectedOption,
+    p1Session.isTimedOut,
+    p1Session.timeLeft,
+    p1Question,
+    timerDuration,
+    sfxEnabled,
+  ]);
+
+  // Deteksi waktu habis Pemain 2 (2 Pemain)
+  useEffect(() => {
+    if (
+      subMode === 'play' &&
+      playerMode === 'two' &&
+      !p2Session.finished &&
+      p2Question &&
+      p2Session.selectedOption === null &&
+      !p2Session.isTimedOut &&
+      timerDuration > 0 &&
+      p2Session.timeLeft === 0
+    ) {
+      setP2Session((prev) => ({ ...prev, isTimedOut: true }));
+      if (sfxEnabled) {
+        playTimeoutSfx();
+      }
+    }
+  }, [
+    subMode,
+    playerMode,
+    p2Session.finished,
+    p2Session.selectedOption,
+    p2Session.isTimedOut,
+    p2Session.timeLeft,
+    p2Question,
+    timerDuration,
+    sfxEnabled,
+  ]);
+
+  // Simpan skor kedua pemain ke Papan Skor saat duel 2 pemain selesai
+  useEffect(() => {
+    if (
+      playerMode === 'two' &&
+      p1Session.finished &&
+      p2Session.finished &&
+      !duelRecorded &&
+      questions.length > 0
+    ) {
+      const now = Date.now();
+      const nowISO = new Date(now).toISOString();
+      const p1Record: QuizScoreRecord = {
+        id: `score_p1_${now}`,
+        studentName: p1Session.name.trim() || 'Pemain 1',
+        score: p1Session.correctCount,
+        total: questions.length,
+        dateISO: nowISO,
+        durationSeconds: p1Session.elapsedSeconds,
+      };
+      const p2Record: QuizScoreRecord = {
+        id: `score_p2_${now + 1}`,
+        studentName: p2Session.name.trim() || 'Pemain 2',
+        score: p2Session.correctCount,
+        total: questions.length,
+        dateISO: nowISO,
+        durationSeconds: p2Session.elapsedSeconds,
+      };
+
+      setScoreHistory((prev) => [p1Record, p2Record, ...prev].slice(0, 30));
+      setLatestScoreId(
+        p1Session.correctCount >= p2Session.correctCount
+          ? p1Record.id
+          : p2Record.id
+      );
+      setDuelRecorded(true);
+      setConfirmClearScores(false);
+
+      if (sfxEnabled) {
+        playVictorySfx();
+      }
+    }
+  }, [
+    playerMode,
+    p1Session.finished,
+    p1Session.name,
+    p1Session.correctCount,
+    p1Session.elapsedSeconds,
+    p2Session.finished,
+    p2Session.name,
+    p2Session.correctCount,
+    p2Session.elapsedSeconds,
+    duelRecorded,
+    questions.length,
+    sfxEnabled,
+  ]);
+
+  const resetDuelSessions = (
+    nextQuestions: QuizQuestion[] = questions,
+    nextTimer: number = timerDuration,
+    keepNames = true
+  ) => {
+    setDuelQuestionsP2(shuffleQuestionsForDuel(nextQuestions));
+    setP1Session((prev) =>
+      createDuelSession(keepNames ? prev.name : 'Pemain 1', nextTimer)
+    );
+    setP2Session((prev) =>
+      createDuelSession(keepNames ? prev.name : 'Pemain 2', nextTimer)
+    );
+    setDuelRecorded(false);
+  };
+
+  const handleToggleSfx = () => {
+    setSfxEnabled((prev) => {
+      const next = !prev;
+      if (next) {
+        playCorrectSfx();
+      }
+      return next;
+    });
+  };
+
+  const handleSwitchPlayerMode = (
+    nextMode: 'single' | 'two' | 'wordsearch'
+  ) => {
+    setPlayerMode(nextMode);
+    if (nextMode === 'two') {
+      resetDuelSessions(questions, timerDuration, true);
+    }
+  };
 
   const handleSelectAnswer = (optionIndex: number) => {
     if (selectedOption !== null || isTimedOut || !activeQuestion) return;
     setSelectedOption(optionIndex);
     if (optionIndex === activeQuestion.correctIndex) {
       setCorrectCount((c) => c + 1);
+      if (sfxEnabled) playCorrectSfx();
+    } else if (sfxEnabled) {
+      playWrongSfx();
     }
   };
 
@@ -373,7 +678,64 @@ export const QuizMode: React.FC = () => {
       setLatestScoreId(record.id);
       setConfirmClearScores(false);
       setQuizFinished(true);
+      if (sfxEnabled) {
+        playVictorySfx();
+      }
     }
+  };
+
+  const handleDuelSelectAnswer = (player: 1 | 2, optionIndex: number) => {
+    const question = player === 1 ? p1Question : p2Question;
+    const session = player === 1 ? p1Session : p2Session;
+    const setSession = player === 1 ? setP1Session : setP2Session;
+
+    if (
+      !question ||
+      session.finished ||
+      session.selectedOption !== null ||
+      session.isTimedOut
+    ) {
+      return;
+    }
+
+    const isCorrect = optionIndex === question.correctIndex;
+    if (sfxEnabled) {
+      if (isCorrect) {
+        playCorrectSfx();
+      } else {
+        playWrongSfx();
+      }
+    }
+
+    setSession((prev) => ({
+      ...prev,
+      selectedOption: optionIndex,
+      correctCount: isCorrect ? prev.correctCount + 1 : prev.correctCount,
+    }));
+  };
+
+  const handleDuelNextQuestion = (player: 1 | 2) => {
+    const listLength =
+      player === 1 ? questions.length : duelQuestionsP2.length;
+    const setSession = player === 1 ? setP1Session : setP2Session;
+
+    setSession((prev) => {
+      if (prev.currentIndex + 1 < listLength) {
+        return {
+          ...prev,
+          currentIndex: prev.currentIndex + 1,
+          selectedOption: null,
+          isTimedOut: false,
+          timeLeft: timerDuration,
+          imageError: false,
+        };
+      }
+      return {
+        ...prev,
+        finished: true,
+        imageError: false,
+      };
+    });
   };
 
   const handleRestartQuiz = () => {
@@ -398,6 +760,7 @@ export const QuizMode: React.FC = () => {
     setElapsedSeconds(0);
     setLatestScoreId(null);
     setQuizFinished(false);
+    resetDuelSessions(questions, seconds, true);
   };
 
   const resetTeacherForm = () => {
@@ -437,7 +800,8 @@ export const QuizMode: React.FC = () => {
       setFormError('Minimal harus tersisa 1 soal di dalam bank kuis.');
       return;
     }
-    setQuestions((prev) => prev.filter((q) => q.id !== id));
+    const updatedQuestions = questions.filter((q) => q.id !== id);
+    setQuestions(updatedQuestions);
     if (editingId === id) {
       resetTeacherForm();
     }
@@ -449,6 +813,7 @@ export const QuizMode: React.FC = () => {
     setElapsedSeconds(0);
     setLatestScoreId(null);
     setQuizFinished(false);
+    resetDuelSessions(updatedQuestions, timerDuration, true);
     setFormSuccess('Soal berhasil dihapus.');
   };
 
@@ -539,15 +904,17 @@ export const QuizMode: React.FC = () => {
         : {}),
     };
 
+    let nextQuestions: QuizQuestion[];
     if (editingId) {
-      setQuestions((prev) =>
-        prev.map((item) => (item.id === editingId ? payload : item))
+      nextQuestions = questions.map((item) =>
+        item.id === editingId ? payload : item
       );
       setFormSuccess('Perubahan soal berhasil disimpan.');
     } else {
-      setQuestions((prev) => [...prev, payload]);
+      nextQuestions = [...questions, payload];
       setFormSuccess('Soal baru berhasil ditambahkan ke kuis.');
     }
+    setQuestions(nextQuestions);
 
     resetTeacherForm();
     setCurrentIndex(0);
@@ -558,6 +925,7 @@ export const QuizMode: React.FC = () => {
     setElapsedSeconds(0);
     setLatestScoreId(null);
     setQuizFinished(false);
+    resetDuelSessions(nextQuestions, timerDuration, true);
   };
 
   const handleRestoreDefaults = () => {
@@ -571,6 +939,7 @@ export const QuizMode: React.FC = () => {
     setElapsedSeconds(0);
     setLatestScoreId(null);
     setQuizFinished(false);
+    resetDuelSessions(DEFAULT_QUIZ_QUESTIONS, timerDuration, true);
     setFormSuccess('Bank soal dikembalikan ke daftar bawaan.');
   };
 
@@ -595,6 +964,330 @@ export const QuizMode: React.FC = () => {
   const displayedSidebarScores =
     boardView === 'ranking' ? rankedScores : scoreHistory;
 
+  const duelCompleted = p1Session.finished && p2Session.finished;
+  const p1DisplayName = p1Session.name.trim() || 'Pemain 1';
+  const p2DisplayName = p2Session.name.trim() || 'Pemain 2';
+  const duelWinner: 1 | 2 | 'tie' | null = !duelCompleted
+    ? null
+    : p1Session.correctCount > p2Session.correctCount
+      ? 1
+      : p2Session.correctCount > p1Session.correctCount
+        ? 2
+        : p1Session.elapsedSeconds < p2Session.elapsedSeconds
+          ? 1
+          : p2Session.elapsedSeconds < p1Session.elapsedSeconds
+            ? 2
+            : 'tie';
+
+  const renderDuelPlayerPanel = (player: 1 | 2) => {
+    const isP1 = player === 1;
+    const session = isP1 ? p1Session : p2Session;
+    const setSession = isP1 ? setP1Session : setP2Session;
+    const questionList = isP1 ? questions : duelQuestionsP2;
+    const question = questionList[session.currentIndex] ?? null;
+    const playerPct = getScorePercentage(
+      session.correctCount,
+      questionList.length
+    );
+
+    const headerStyle = isP1
+      ? 'bg-red-50 border-b border-red-100'
+      : 'bg-sky-50 border-b border-sky-100';
+    const badgeStyle = isP1
+      ? 'bg-red-700 text-white'
+      : 'bg-sky-700 text-white';
+    const progressFillStyle = isP1 ? 'bg-red-700' : 'bg-sky-700';
+    const ringFocusStyle = isP1 ? 'focus:ring-red-700' : 'focus:ring-sky-700';
+
+    return (
+      <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden flex flex-col">
+        {/* Header Pemain */}
+        <div
+          className={`px-4 py-3 flex flex-wrap items-center justify-between gap-2.5 ${headerStyle}`}
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span
+              className={`px-2.5 py-1 rounded-md text-xs font-bold whitespace-nowrap shrink-0 ${badgeStyle}`}
+            >
+              Pemain {player}
+            </span>
+            <input
+              type="text"
+              value={session.name}
+              onChange={(e) =>
+                setSession((prev) => ({ ...prev, name: e.target.value }))
+              }
+              placeholder={`Nama Pemain ${player}`}
+              className={`px-2.5 py-1 rounded-lg border border-slate-300 bg-white text-xs sm:text-sm font-medium text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 w-36 sm:w-44 ${ringFocusStyle}`}
+            />
+          </div>
+
+          <div className="flex items-center gap-3 text-xs font-mono tabular-nums">
+            <span className="font-bold text-slate-900">
+              Skor: {session.correctCount}/{questionList.length}
+            </span>
+            <span className="text-slate-400" aria-hidden="true">
+              ·
+            </span>
+            <span className="font-semibold text-slate-600">
+              {formatDurationSeconds(session.elapsedSeconds) || '0 dtk'}
+            </span>
+          </div>
+        </div>
+
+        {/* Isi Kuis Pemain */}
+        <div className="p-4 sm:p-5 flex-1">
+          {questionList.length === 0 ? (
+            <p className="text-sm text-slate-600 py-8 text-center">
+              Belum ada soal kuis. Tambahkan soal melalui Mode Guru.
+            </p>
+          ) : session.finished ? (
+            <div className="py-6 text-center space-y-3">
+              <div
+                className={`w-12 h-12 rounded-xl border flex items-center justify-center mx-auto ${
+                  duelWinner === player
+                    ? 'bg-amber-100 border-amber-300 text-amber-700'
+                    : 'bg-slate-100 border-slate-200 text-slate-700'
+                }`}
+              >
+                {duelWinner === player ? (
+                  <Crown className="w-6 h-6" />
+                ) : (
+                  <CheckCircle2 className="w-6 h-6" />
+                )}
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-slate-500">
+                  {session.name.trim() || `Pemain ${player}`} · Selesai
+                </p>
+                <h4 className="text-2xl font-bold text-slate-900 font-mono tabular-nums mt-1">
+                  {session.correctCount} / {questionList.length} ({playerPct}%)
+                </h4>
+                <p className="text-xs text-slate-600 mt-1 font-mono tabular-nums">
+                  Waktu pengerjaan:{' '}
+                  {formatDurationSeconds(session.elapsedSeconds)}
+                </p>
+              </div>
+              {!duelCompleted && (
+                <p className="text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 inline-block">
+                  Menunggu Pemain {isP1 ? '2' : '1'} menyelesaikan seluruh
+                  soal...
+                </p>
+              )}
+            </div>
+          ) : question ? (
+            <div className="space-y-4">
+              {/* Baris Progress & Timer */}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-slate-700 font-mono tabular-nums">
+                  Soal {session.currentIndex + 1} dari {questionList.length}
+                </span>
+
+                {timerDuration > 0 && (
+                  <div
+                    aria-live="polite"
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-xs font-mono tabular-nums font-bold ${
+                      session.isTimedOut
+                        ? 'bg-red-50 border-red-300 text-red-700'
+                        : session.timeLeft <= 5 &&
+                            session.selectedOption === null
+                          ? 'bg-red-50 border-red-300 text-red-700'
+                          : session.timeLeft <= 10 &&
+                              session.selectedOption === null
+                            ? 'bg-amber-50 border-amber-300 text-amber-800'
+                            : 'bg-slate-50 border-slate-200 text-slate-800'
+                    }`}
+                  >
+                    <Clock className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      {session.isTimedOut
+                        ? 'Waktu Habis'
+                        : session.selectedOption !== null
+                          ? `Terjawab (${String(session.timeLeft).padStart(2, '0')} dtk)`
+                          : `${String(session.timeLeft).padStart(2, '0')} dtk`}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-transform duration-300 origin-left ${progressFillStyle}`}
+                    style={{
+                      transform: `scaleX(${(session.currentIndex + 1) / questionList.length})`,
+                    }}
+                  />
+                </div>
+                {timerDuration > 0 && (
+                  <div className="w-full h-1 bg-slate-100 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-500 origin-left ${
+                        session.isTimedOut || session.timeLeft <= 5
+                          ? 'bg-red-600'
+                          : session.timeLeft <= 10
+                            ? 'bg-amber-500'
+                            : 'bg-sky-600'
+                      }`}
+                      style={{
+                        width: `${Math.max(0, Math.min(100, (session.timeLeft / timerDuration) * 100))}%`,
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Pertanyaan */}
+              <h4 className="text-base sm:text-lg font-semibold text-slate-900 leading-snug">
+                {question.question}
+              </h4>
+
+              {/* Gambar Pendukung Soal */}
+              {question.imageUrl && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-center space-y-1.5">
+                  {!session.imageError ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setZoomedQuizImage({
+                          url: question.imageUrl!,
+                          caption: question.imageCaption,
+                        })
+                      }
+                      className="group rounded-lg bg-white border border-slate-200 p-1.5 hover:border-slate-300 transition-colors inline-block"
+                      title="Klik untuk memperbesar gambar soal"
+                    >
+                      <img
+                        src={question.imageUrl}
+                        alt={
+                          question.imageCaption ||
+                          `Gambar pendukung soal Pemain ${player}`
+                        }
+                        onError={() =>
+                          setSession((prev) => ({ ...prev, imageError: true }))
+                        }
+                        className="max-h-40 w-auto object-contain mx-auto"
+                        referrerPolicy="no-referrer"
+                      />
+                    </button>
+                  ) : (
+                    <p className="text-xs text-red-700 py-2">
+                      Gambar pendukung tidak dapat dimuat.
+                    </p>
+                  )}
+                  {question.imageCaption && !session.imageError && (
+                    <p className="text-[11px] text-slate-600">
+                      {question.imageCaption}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Pilihan A-D */}
+              <div className="grid grid-cols-1 gap-2">
+                {question.options.map((optionText, idx) => {
+                  const isAnswered =
+                    session.selectedOption !== null || session.isTimedOut;
+                  const isSelected = session.selectedOption === idx;
+                  const isCorrect = idx === question.correctIndex;
+
+                  let buttonStyle =
+                    'border-slate-200 bg-white hover:bg-slate-50 text-slate-800';
+                  if (isAnswered) {
+                    if (isCorrect) {
+                      buttonStyle =
+                        'border-emerald-600 bg-emerald-50 text-emerald-950';
+                    } else if (isSelected && !isCorrect) {
+                      buttonStyle = 'border-red-600 bg-red-50 text-red-950';
+                    } else {
+                      buttonStyle =
+                        'border-slate-200 bg-slate-50 text-slate-500';
+                    }
+                  }
+
+                  return (
+                    <button
+                      key={idx}
+                      type="button"
+                      disabled={isAnswered}
+                      onClick={() => handleDuelSelectAnswer(player, idx)}
+                      className={`w-full text-left px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm font-medium transition-colors flex items-center justify-between gap-2.5 min-h-[44px] ${buttonStyle}`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <span className="font-mono tabular-nums text-xs font-bold w-6 h-6 rounded-md bg-slate-100 border border-slate-200 flex items-center justify-center shrink-0 text-slate-700">
+                          {OPTION_LETTERS[idx]}
+                        </span>
+                        <span>{optionText}</span>
+                      </div>
+
+                      {isAnswered && isCorrect && (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                      )}
+                      {isAnswered && isSelected && !isCorrect && (
+                        <XCircle className="w-4 h-4 text-red-700 shrink-0" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Umpan Balik & Lanjut */}
+              {(session.selectedOption !== null || session.isTimedOut) && (
+                <div className="pt-3 border-t border-slate-100 space-y-2.5">
+                  <div className="text-xs sm:text-sm">
+                    <p
+                      className={`font-semibold flex items-center gap-1.5 ${
+                        session.selectedOption === question.correctIndex
+                          ? 'text-emerald-700'
+                          : 'text-red-700'
+                      }`}
+                    >
+                      {session.isTimedOut ? (
+                        <>
+                          <Clock className="w-4 h-4 shrink-0" />
+                          <span>
+                            Waktu habis! Benar:{' '}
+                            {question.options[question.correctIndex]}
+                          </span>
+                        </>
+                      ) : session.selectedOption === question.correctIndex ? (
+                        <>
+                          <CheckCircle2 className="w-4 h-4 shrink-0" />
+                          <span>Jawaban Benar!</span>
+                        </>
+                      ) : (
+                        <>
+                          <XCircle className="w-4 h-4 shrink-0" />
+                          <span>
+                            Kurang tepat. Benar:{' '}
+                            {question.options[question.correctIndex]}
+                          </span>
+                        </>
+                      )}
+                    </p>
+                    <p className="text-xs text-slate-600 mt-1">
+                      {question.explanation}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleDuelNextQuestion(player)}
+                    className="w-full py-2.5 px-4 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-semibold transition-colors min-h-[44px]"
+                  >
+                    {session.currentIndex + 1 < questionList.length
+                      ? 'Soal Berikutnya'
+                      : 'Selesaikan Kuis'}
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      </section>
+    );
+  };
+
   return (
     <div className="space-y-6">
       {/* Sub-mode switcher */}
@@ -604,8 +1297,8 @@ export const QuizMode: React.FC = () => {
             Kuis Budaya Kekerabatan Lampung
           </h2>
           <p className="text-sm text-slate-600 mt-0.5">
-            Uji pemahaman peserta didik atau kelola pertanyaan beserta gambar
-            pendukung melalui Mode Guru.
+            Uji pemahaman peserta didik (1 atau 2 pemain) atau kelola pertanyaan
+            beserta gambar pendukung melalui Mode Guru.
           </p>
         </div>
 
@@ -636,7 +1329,230 @@ export const QuizMode: React.FC = () => {
       </div>
 
       {subMode === 'play' ? (
-        <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6 items-start">
+        <div className="space-y-5">
+          {/* Bar Model Bermain (1 Pemain / 2 Pemain / Kata Misteri) + Kontrol Efek Suara */}
+          <div className="bg-white border border-slate-200 rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="text-xs font-semibold text-slate-600">
+                Mode Permainan:
+              </span>
+              <div className="inline-flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-lg">
+                <button
+                  type="button"
+                  onClick={() => handleSwitchPlayerMode('single')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                    playerMode === 'single'
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <User className="w-3.5 h-3.5" />
+                  <span>1 Pemain</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSwitchPlayerMode('two')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                    playerMode === 'two'
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>2 Pemain (Layar Terbagi)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSwitchPlayerMode('wordsearch')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                    playerMode === 'wordsearch'
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Grid3X3 className="w-3.5 h-3.5" />
+                  <span>Kata Misteri</span>
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleToggleSfx}
+              aria-pressed={sfxEnabled}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                sfxEnabled
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100'
+                  : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              {sfxEnabled ? (
+                <>
+                  <Volume2 className="w-3.5 h-3.5" />
+                  <span>Efek Suara: Aktif</span>
+                </>
+              ) : (
+                <>
+                  <VolumeX className="w-3.5 h-3.5" />
+                  <span>Efek Suara: Bisu</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {playerMode === 'wordsearch' ? (
+            <WordSearchGame sfxEnabled={sfxEnabled} />
+          ) : playerMode === 'two' ? (
+            <div className="space-y-5">
+              {/* Papan Duel Ringkas + Pengumuman Juara */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-3 text-xs sm:text-sm">
+                    <span className="font-bold text-red-700 font-mono tabular-nums">
+                      {p1DisplayName}: {p1Session.correctCount}/
+                      {questions.length}
+                    </span>
+                    <span className="font-bold text-slate-400">VS</span>
+                    <span className="font-bold text-sky-700 font-mono tabular-nums">
+                      {p2DisplayName}: {p2Session.correctCount}/
+                      {duelQuestionsP2.length}
+                    </span>
+                    <span className="text-slate-300" aria-hidden="true">
+                      |
+                    </span>
+                    <span className="text-xs text-slate-500">
+                      Soal diacak per halaman · Skor tertinggi menjadi juara
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      resetDuelSessions(questions, timerDuration, true)
+                    }
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 whitespace-nowrap shrink-0 self-start sm:self-auto"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Mulai Ulang Duel</span>
+                  </button>
+                </div>
+
+                {duelCompleted && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="flex items-start gap-3.5">
+                      <div className="w-11 h-11 rounded-xl bg-amber-100 border border-amber-300 text-amber-700 flex items-center justify-center shrink-0">
+                        <Crown className="w-6 h-6" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold text-amber-800">
+                          Hasil Akhir Kuis 2 Pemain
+                        </p>
+                        <h3 className="text-lg sm:text-xl font-bold text-slate-900 mt-0.5">
+                          {duelWinner === 'tie'
+                            ? 'Hasil Seri (Imbang)!'
+                            : `Juara: ${duelWinner === 1 ? p1DisplayName : p2DisplayName}`}
+                        </h3>
+                        <p className="text-xs sm:text-sm text-slate-700 mt-1 font-mono tabular-nums">
+                          {p1DisplayName}: {p1Session.correctCount}/
+                          {questions.length} (
+                          {getScorePercentage(
+                            p1Session.correctCount,
+                            questions.length
+                          )}
+                          % · {formatDurationSeconds(p1Session.elapsedSeconds)})
+                          <span className="mx-2 text-slate-400">·</span>
+                          {p2DisplayName}: {p2Session.correctCount}/
+                          {duelQuestionsP2.length} (
+                          {getScorePercentage(
+                            p2Session.correctCount,
+                            duelQuestionsP2.length
+                          )}
+                          % · {formatDurationSeconds(p2Session.elapsedSeconds)})
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        resetDuelSessions(questions, timerDuration, true)
+                      }
+                      className="inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg bg-red-700 hover:bg-red-800 text-white text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap shrink-0 min-h-[44px]"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      <span>Main Lagi (2 Pemain)</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Halaman Kuis Dibagi 2 Halaman */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 lg:gap-5 items-start">
+                {renderDuelPlayerPanel(1)}
+                {renderDuelPlayerPanel(2)}
+              </div>
+
+              {/* Papan Skor Ringkas di Bawah Mode 2 Pemain */}
+              {rankedScores.length > 0 && (
+                <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Trophy className="w-4 h-4 text-amber-600" />
+                      <h3 className="text-base font-bold text-slate-900">
+                        Papan Skor Kelas ({rankedScores.length} Catatan)
+                      </h3>
+                    </div>
+                    <span className="text-xs text-slate-500 font-mono tabular-nums">
+                      Tertinggi: {highestPct}% · Rata-rata: {averagePct}%
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                    {rankedScores.slice(0, 6).map((item, idx) => {
+                      const pct = getScorePercentage(item.score, item.total);
+                      const durationText = formatDurationSeconds(
+                        item.durationSeconds
+                      );
+                      return (
+                        <div
+                          key={item.id}
+                          className="px-3 py-2.5 rounded-xl border border-slate-200 bg-slate-50/70 flex items-center justify-between gap-2 text-xs"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span
+                              className={`w-6 h-6 rounded-md border font-mono tabular-nums text-[11px] font-bold flex items-center justify-center shrink-0 ${
+                                idx === 0
+                                  ? 'bg-amber-100 border-amber-300 text-amber-800'
+                                  : idx === 1
+                                    ? 'bg-slate-200 border-slate-300 text-slate-800'
+                                    : idx === 2
+                                      ? 'bg-orange-100 border-orange-300 text-orange-800'
+                                      : 'bg-white border-slate-200 text-slate-600'
+                              }`}
+                            >
+                              {idx + 1}
+                            </span>
+                            <div className="min-w-0">
+                              <p className="font-semibold text-slate-900 truncate">
+                                {item.studentName}
+                              </p>
+                              <p className="text-[11px] text-slate-500">
+                                {durationText || 'Selesai'}
+                              </p>
+                            </div>
+                          </div>
+                          <span className="font-mono tabular-nums font-bold text-slate-900 shrink-0">
+                            {item.score}/{item.total} ({pct}%)
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6 items-start">
           {/* Main Quiz Card */}
           <section className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6">
             {questions.length === 0 ? (
@@ -1198,6 +2114,8 @@ export const QuizMode: React.FC = () => {
               </div>
             )}
           </aside>
+            </div>
+          )}
         </div>
       ) : (
         /* Teacher Editor Mode */

@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
 import { X, ZoomIn } from 'lucide-react';
+import { AboutApp } from './components/AboutApp';
 import { ResultPanel } from './components/ResultPanel';
 import { QuizMode } from './components/QuizMode';
 import { SilsilahExplorer } from './components/SilsilahExplorer';
@@ -14,7 +15,7 @@ import {
   WheelPosition,
 } from './data/kinshipData';
 
-type WorkspaceTab = 'wheel' | 'silsilah' | 'quiz';
+type WorkspaceTab = 'wheel' | 'silsilah' | 'quiz' | 'about';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('wheel');
@@ -99,6 +100,17 @@ export default function App() {
             >
               Kuis &amp; Mode Guru
             </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('about')}
+              className={`py-1 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+                activeTab === 'about'
+                  ? 'border-red-700 text-slate-900 font-semibold'
+                  : 'border-transparent hover:text-slate-900'
+              }`}
+            >
+              Tentang Aplikasi
+            </button>
           </nav>
 
           {/* Zone 3: Single Primary Action */}
@@ -157,6 +169,17 @@ export default function App() {
             }`}
           >
             Kuis &amp; Mode Guru
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('about')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 ${
+              activeTab === 'about'
+                ? 'bg-slate-900 text-white'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            Tentang Aplikasi
           </button>
         </div>
       </header>
@@ -322,6 +345,8 @@ export default function App() {
         {activeTab === 'silsilah' && <SilsilahExplorer />}
 
         {activeTab === 'quiz' && <QuizMode />}
+
+        {activeTab === 'about' && <AboutApp />}
       </main>
 
       {/* Lightbox Modal for Supplementary Silsilah Diagrams */}
